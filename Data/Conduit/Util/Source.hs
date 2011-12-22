@@ -8,12 +8,14 @@ module Data.Conduit.Util.Source
     ( sourceIO
     , transSource
     , sourceState
+    , sourceJoin
     ) where
 
 import Control.Monad.Trans.Resource
 import Control.Monad.Trans.Class (lift)
 import Data.Conduit.Types.Source
 import Control.Monad (liftM)
+import Data.Monoid
 
 -- | Construct a 'Source' with some stateful functions. This function address
 -- all mutable state for you.
@@ -63,3 +65,32 @@ transSource f (Source mc) =
         { sourcePull = transResourceT f (sourcePull c)
         , sourceClose = transResourceT f (sourceClose c)
         }
+
+sourceJoin :: Resource m => Source m (Source m a) -> Source m a
+sourceJoin s = Source $ do
+  ps <- prepareSource s
+  innerSource <- newRef Nothing
+  let pull = do inner <- readRef innerSource
+                case inner of
+                  Just x -> do SourceResult st vs <- sourcePull x
+                               case st of
+                                 StreamClosed -> writeRef innerSource Nothing
+                                 StreamOpen   -> return ()
+                               return $ SourceResult StreamOpen vs
+                  Nothing -> do SourceResult st xs <- sourcePull ps
+                                inner' <- prepareSource $ mconcat xs
+                                case st of
+                                  StreamOpen   -> do writeRef innerSource (Just inner')
+                                                     pull
+                                  StreamClosed -> do vs <- eat inner'
+                                                     return $ SourceResult StreamClosed vs
+      close = do maybe (return ()) sourceClose =<< readRef innerSource
+                 sourceClose ps
+      eat i = do SourceResult st xs <- sourcePull i
+                 case st of
+                   StreamClosed -> return xs
+                   StreamOpen -> (xs++) `liftM` eat i
+  return $ PreparedSource {
+      sourcePull = pull
+    , sourceClose = close
+    }
