@@ -107,24 +107,18 @@ sourceJoin s = Source $ do
   innerSource <- newRef Nothing
   let pull = do inner <- readRef innerSource
                 case inner of
-                  Just x -> do SourceResult st vs <- sourcePull x
+                  Just x -> do st <- sourcePull x
                                case st of
-                                 StreamClosed -> writeRef innerSource Nothing
-                                 StreamOpen   -> return ()
-                               return $ SourceResult StreamOpen vs
-                  Nothing -> do SourceResult st xs <- sourcePull ps
-                                inner' <- prepareSource $ mconcat xs
+                                 Closed -> do pullFrom Nothing
+                                 Open vs -> return $ Open vs
+                  Nothing -> do st <- sourcePull ps                                
                                 case st of
-                                  StreamOpen   -> do writeRef innerSource (Just inner')
-                                                     pull
-                                  StreamClosed -> do vs <- eat inner'
-                                                     return $ SourceResult StreamClosed vs
+                                  Open xs -> do inner' <- prepareSource $ mconcat xs
+                                                pullFrom (Just inner')
+                                  Closed -> return Closed
+      pullFrom x = writeRef innerSource x >> pull
       close = do maybe (return ()) sourceClose =<< readRef innerSource
                  sourceClose ps
-      eat i = do SourceResult st xs <- sourcePull i
-                 case st of
-                   StreamClosed -> return xs
-                   StreamOpen -> (xs++) `liftM` eat i
   return $ PreparedSource {
       sourcePull = pull
     , sourceClose = close
