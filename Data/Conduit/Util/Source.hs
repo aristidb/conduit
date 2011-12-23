@@ -10,6 +10,7 @@ module Data.Conduit.Util.Source
     , transSource
     , sourceState
     , sourceJoin
+    , sourceReturn
     ) where
 
 import Control.Monad.Trans.Resource
@@ -123,3 +124,9 @@ sourceJoin s = Source $ do
       sourcePull = pull
     , sourceClose = close
     }
+
+sourceReturn :: Resource m => a -> Source m a
+sourceReturn x = sourceState True
+                             (\s -> case s of
+                                 False -> return (False, Closed)
+                                 True -> return (False, Open [x]))
