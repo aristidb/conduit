@@ -28,9 +28,18 @@ import qualified Data.Text.Lazy.Encoding as TLE
 import Control.Monad.Trans.Resource (runExceptionT_, withIO, resourceForkIO)
 import Control.Concurrent (threadDelay, killThread)
 import Control.Monad.IO.Class (liftIO)
+import Control.Applicative (pure, (<$>), (<*>))
 
 main :: IO ()
 main = hspecX $ do
+    describe "data loss rules" $ do
+        it "sink yield" $ do
+            x <- runResourceT $ CL.sourceList [1..10 :: Int] C.$$ do
+                CL.drop 5
+                C.yield [11..15] ()
+                return ()
+                CL.consume
+            x @?= [11..15] ++ [6..10]
     describe "filter" $ do
         it "even" $ do
             x <- runResourceT $ CL.sourceList [1..10] C.$$ CL.filter even C.=$ CL.consume
@@ -105,6 +114,11 @@ main = hspecX $ do
                 _ <- CL.take 5
                 CL.fold (+) (0 :: Int)
             x @?= sum [6..10]
+    describe "Applicative instance for Sink" $ do
+        it "<$> and <*>" $ do
+            x <- runResourceT $ CL.sourceList [1..10] C.$$
+                (+) <$> pure 5 <*> CL.fold (+) (0 :: Int)
+            x @?= sum [1..10] + 5
     describe "resumable sources" $ do
         it "simple" $ do
             (x, y, z) <- runResourceT $ do
@@ -165,22 +179,27 @@ main = hspecX $ do
                 return (x, y)
             x @?= [1..5]
             y @?= [6..10]
+        it "consumes all data regardless of sink" $ do
+            x <- runResourceT $ CL.sourceList [1..10 :: Int] C.$$ do
+                CL.isolate 5 C.=$ return ()
+                CL.consume
+            x @?= [6..10]
     describe "lazy" $ do
         it' "works inside a ResourceT" $ runResourceT $ do
             counter <- C.liftBase $ I.newIORef 0
             let incr i = C.sourceIO
-                    (C.liftBase $ I.newIORef $ C.SourceResult C.StreamOpen [i :: Int])
+                    (C.liftBase $ I.newIORef $ C.Open [i :: Int])
                     (const $ return ())
                     (\istate -> do
-                        state@(C.SourceResult sstate _) <- C.liftBase $ I.atomicModifyIORef istate
-                            (\state -> (C.SourceResult C.StreamClosed [], state))
-                        case sstate of
-                            C.StreamClosed -> return ()
+                        res <- C.liftBase $ I.atomicModifyIORef istate
+                            (\state -> (C.Closed, state))
+                        case res of
+                            C.Closed -> return ()
                             _ -> do
                                 count <- C.liftBase $ I.atomicModifyIORef counter
                                     (\j -> (j + 1, j + 1))
                                 C.liftBase $ count @?= i
-                        return state
+                        return res
                             )
             nums <- CLazy.lazyConsume $ mconcat $ map incr [1..10]
             C.liftBase $ nums @?= [1..10]
