@@ -33,17 +33,35 @@ import Control.Applicative (pure, (<$>), (<*>))
 main :: IO ()
 main = hspecX $ do
     describe "data loss rules" $ do
+        {- FIXME
         it "sink yield" $ do
-            x <- runResourceT $ CL.sourceList [1..10 :: Int] C.$$ do
+            x <- runResourceT $ CL.sourceList (map return [1..10 :: Int]) C.$$ do
                 CL.drop 5
                 C.yield [11..15] ()
                 return ()
                 CL.consume
             x @?= [11..15] ++ [6..10]
+        -}
+
+        it "consumes the source to quickly" $ do
+            x <- runResourceT $ CL.sourceList [1..10 :: Int] C.$$ do
+                  strings <- CL.map show C.=$ CL.take 5
+                  liftIO $ putStr $ unlines strings
+                  CL.fold (+) 0
+            40 @?= x
+
+        it "correctly consumes a chunked resource" $ do
+            x <- runResourceT $ (CL.sourceList [1..5 :: Int] `mappend` CL.sourceList [6..10]) C.$$ do
+                strings <- CL.map show C.=$ CL.take 5
+                liftIO $ putStr $ unlines strings
+                CL.fold (+) 0
+            40 @?= x
+
     describe "filter" $ do
         it "even" $ do
             x <- runResourceT $ CL.sourceList [1..10] C.$$ CL.filter even C.=$ CL.consume
             x @?= filter even [1..10 :: Int]
+
     describe "ResourceT" $ do
         it "resourceForkIO" $ do
             counter <- I.newIORef 0
@@ -67,6 +85,7 @@ main = hspecX $ do
             threadDelay 1000
             res <- I.readIORef counter
             res @?= (0 :: Int)
+
     describe "sum" $ do
         it "works for 1..10" $ do
             x <- runResourceT $ CL.sourceList [1..10] C.$$ CL.fold (+) (0 :: Int)
@@ -74,6 +93,7 @@ main = hspecX $ do
         prop "is idempotent" $ \list ->
             (runST $ runResourceT $ CL.sourceList list C.$$ CL.fold (+) (0 :: Int))
             == sum list
+
     describe "Monoid instance for Source" $ do
         it "mappend" $ do
             x <- runResourceT $ (CL.sourceList [1..5 :: Int] `mappend` CL.sourceList [6..10]) C.$$ CL.fold (+) 0
@@ -85,20 +105,24 @@ main = hspecX $ do
                 , CL.sourceList [11..20]
                 ] C.$$ CL.fold (+) 0
             x @?= sum [1..20]
+
     describe "file access" $ do
         it "read" $ do
             bs <- S.readFile "conduit.cabal"
             bss <- runResourceT $ CB.sourceFile "conduit.cabal" C.$$ CL.consume
             bs @=? S.concat bss
+
         it "read range" $ do
             S.writeFile "tmp" "0123456789"
             bss <- runResourceT $ CB.sourceFileRange "tmp" (Just 2) (Just 3) C.$$ CL.consume
             S.concat bss @?= "234"
+
         it "write" $ do
             runResourceT $ CB.sourceFile "conduit.cabal" C.$$ CB.sinkFile "tmp"
             bs1 <- S.readFile "conduit.cabal"
             bs2 <- S.readFile "tmp"
             bs1 @=? bs2
+
         it "conduit" $ do
             runResourceT $ CB.sourceFile "conduit.cabal"
                 C.$= CB.conduitFile "tmp"
@@ -108,17 +132,20 @@ main = hspecX $ do
             bs3 <- S.readFile "tmp2"
             bs1 @=? bs2
             bs1 @=? bs3
+
     describe "Monad instance for Sink" $ do
         it "binding" $ do
             x <- runResourceT $ CL.sourceList [1..10] C.$$ do
                 _ <- CL.take 5
                 CL.fold (+) (0 :: Int)
             x @?= sum [6..10]
+
     describe "Applicative instance for Sink" $ do
         it "<$> and <*>" $ do
             x <- runResourceT $ CL.sourceList [1..10] C.$$
                 (+) <$> pure 5 <*> CL.fold (+) (0 :: Int)
             x @?= sum [1..10] + 5
+
     describe "resumable sources" $ do
         it "simple" $ do
             (x, y, z) <- runResourceT $ do
@@ -130,6 +157,7 @@ main = hspecX $ do
             x @?= [1..5] :: IO ()
             y @?= sum [6..10]
             z @?= []
+
     describe "conduits" $ do
         it "map, left" $ do
             x <- runResourceT $
@@ -137,22 +165,26 @@ main = hspecX $ do
                     C.$= CL.map (* 2)
                     C.$$ CL.fold (+) 0
             x @?= 2 * sum [1..10 :: Int]
+
         it "map, right" $ do
             x <- runResourceT $
                 CL.sourceList [1..10]
                     C.$$ CL.map (* 2)
                     C.=$ CL.fold (+) 0
             x @?= 2 * sum [1..10 :: Int]
+
         it "concatMap" $ do
             let input = [1, 11, 21]
             x <- runResourceT $ CL.sourceList input
                     C.$$ CL.concatMap (\i -> enumFromTo i (i + 9))
                     C.=$ CL.fold (+) (0 :: Int)
             x @?= sum [1..30]
+
         it "bind together" $ do
             let conduit = CL.map (+ 5) C.=$= CL.map (* 2)
             x <- runResourceT $ CL.sourceList [1..10] C.$= conduit C.$$ CL.fold (+) 0
             x @?= sum (map (* 2) $ map (+ 5) [1..10 :: Int])
+
 #if !FAST
     describe "isolate" $ do
         it "bound to resumable source" $ do
@@ -163,6 +195,7 @@ main = hspecX $ do
                 return (x, y)
             x @?= [1..5]
             y @?= [6..10]
+
         it "bound to sink, non-resumable" $ do
             (x, y) <- runResourceT $ do
                 CL.sourceList [1..10 :: Int] C.$$ do
@@ -171,6 +204,7 @@ main = hspecX $ do
                     return (x, y)
             x @?= [1..5]
             y @?= [6..10]
+
         it "bound to sink, resumable" $ do
             (x, y) <- runResourceT $ do
                 bsrc <- C.bufferSource $ CL.sourceList [1..10 :: Int]
@@ -179,16 +213,18 @@ main = hspecX $ do
                 return (x, y)
             x @?= [1..5]
             y @?= [6..10]
-        it "consumes all data regardless of sink" $ do
+
+        it "consumes all data" $ do
             x <- runResourceT $ CL.sourceList [1..10 :: Int] C.$$ do
-                CL.isolate 5 C.=$ return ()
+                CL.isolate 5 C.=$ CL.sinkNull
                 CL.consume
             x @?= [6..10]
+
     describe "lazy" $ do
         it' "works inside a ResourceT" $ runResourceT $ do
             counter <- C.liftBase $ I.newIORef 0
             let incr i = C.sourceIO
-                    (C.liftBase $ I.newIORef $ C.Open [i :: Int])
+                    (C.liftBase $ I.newIORef $ C.Open (i :: Int))
                     (const $ return ())
                     (\istate -> do
                         res <- C.liftBase $ I.atomicModifyIORef istate
@@ -203,10 +239,11 @@ main = hspecX $ do
                             )
             nums <- CLazy.lazyConsume $ mconcat $ map incr [1..10]
             C.liftBase $ nums @?= [1..10]
-    describe "isolate" $ do
+
+    describe "sequence" $ do
         it "works" $ do
             let sink = do
-                    _ <- CL.take 2
+                    _ <- CL.drop 2
                     CL.head
             let conduit = C.sequence sink
             res <- runResourceT $ CL.sourceList [1..10 :: Int]
@@ -214,6 +251,7 @@ main = hspecX $ do
                            C.$$ CL.consume
             catMaybes res @?= [3, 6, 9]
 #endif
+
     describe "peek" $ do
         it "works" $ do
             (a, b) <- runResourceT $ CL.sourceList [1..10 :: Int] C.$$ do
@@ -221,6 +259,7 @@ main = hspecX $ do
                 b <- CL.consume
                 return (a, b)
             (a, b) @?= (Just 1, [1..10])
+
     describe "zlib" $ do
         prop "idempotent" $ \bss' -> runST $ runResourceT $ do
             let bss = map S.pack bss'
@@ -228,6 +267,7 @@ main = hspecX $ do
                 src = mconcat $ map (CL.sourceList . return) bss
             outBss <- src C.$= CZ.gzip C.$= CZ.ungzip C.$$ CL.consume
             return $ lbs == L.fromChunks outBss
+
     describe "text" $ do
         let go enc tenc cenc = do
                 prop (enc ++ " single chunk") $ \chars -> runST $ runExceptionT_ $ runResourceT $ do
@@ -253,12 +293,14 @@ main = hspecX $ do
         go "utf16_be" TLE.encodeUtf16BE CT.utf16_be
         go "utf32_le" TLE.encodeUtf32LE CT.utf32_le
         go "utf32_be" TLE.encodeUtf32BE CT.utf32_be
+
     describe "binary isolate" $ do
         it "works" $ do
             bss <- runResourceT $ CL.sourceList (replicate 1000 "X")
                            C.$= CB.isolate 6
                            C.$$ CL.consume
             S.concat bss @?= "XXXXXX"
+
 #if !FAST
     describe "blaze" $ do
         prop "idempotent to toLazyByteString" $ \bss' -> runST $ runResourceT $ do
@@ -268,12 +310,14 @@ main = hspecX $ do
             let src = mconcat $ map (CL.sourceList . return) builders
             outBss <- src C.$= builderToByteString C.$$ CL.consume
             return $ lbs == L.fromChunks outBss
+
         it "works for large input" $ runResourceT $ do
             let builders = replicate 10000 (fromByteString "hello world!")
             let lbs = toLazyByteString $ mconcat builders
             let src = mconcat $ map (CL.sourceList . return) builders
             outBss <- src C.$= builderToByteString C.$$ CL.consume :: C.ResourceT IO [S.ByteString]
             C.liftBase $ lbs @=? L.fromChunks outBss
+
         it "works for lazy bytestring insertion" $ runResourceT $ do
             let builders = replicate 10000 (insertLazyByteString "hello world!")
             let lbs = toLazyByteString $ mconcat builders
