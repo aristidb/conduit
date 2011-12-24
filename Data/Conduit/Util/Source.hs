@@ -17,7 +17,6 @@ import Control.Monad.Trans.Resource
 import Control.Monad.Trans.Class (lift)
 import Data.Conduit.Types.Source
 import Control.Monad (liftM)
-import Data.Monoid
 
 -- | Construct a 'Source' with some stateful functions. This function address
 -- all mutable state for you.
@@ -114,7 +113,7 @@ sourceJoin s = Source $ do
                                  Open vs -> return $ Open vs
                   Nothing -> do st <- sourcePull ps                                
                                 case st of
-                                  Open xs -> do inner' <- prepareSource $ mconcat xs
+                                  Open xs -> do inner' <- prepareSource xs
                                                 pullFrom (Just inner')
                                   Closed -> return Closed
       pullFrom x = writeRef innerSource x >> pull
@@ -129,4 +128,4 @@ sourceReturn :: Resource m => a -> Source m a
 sourceReturn x = sourceState True
                              (\s -> case s of
                                  False -> return (False, Closed)
-                                 True -> return (False, Open [x]))
+                                 True -> return (False, Open x))
