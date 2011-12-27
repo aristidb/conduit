@@ -5,12 +5,13 @@
 -- | Utilities for constructing and covnerting conduits. Please see
 -- "Data.Conduit.Types.Conduit" for more information on the base types.
 module Data.Conduit.Util.Conduit
-    ( conduitIO
-    , conduitState
+    ( conduitState
+    , conduitIO
     , transConduit
-    , SinkConduit
-    , sinkConduit
-    , SinkConduitResponse (..)
+      -- *** Sequencing
+    , SequencedSink
+    , sequenceSink
+    , SequencedSinkResponse (..)
     ) where
 
 import Control.Monad.Trans.Resource
@@ -103,42 +104,47 @@ transConduit f (Conduit mc) =
         , conduitClose = transResourceT f (conduitClose c)
         }
 
-data SinkConduitResponse state input m output =
-    Emit state [output]
-  | Stop
-  | StartConduit (Conduit input m output)
+-- | Return value from a 'SequencedSink'.
+data SequencedSinkResponse state input m output =
+    Emit state [output] -- ^ Set a new state, and emit some new output.
+  | Stop -- ^ End the conduit.
+  | StartConduit (Conduit input m output) -- ^ Pass control to a new conduit.
 
-type SinkConduit state input m output =
-    state -> Sink input m (SinkConduitResponse state input m output)
+-- | Helper type for constructing a @Conduit@ based on @Sink@s. This allows you
+-- to write higher-level code that takes advantage of existing conduits and
+-- sinks, and leverages a sink's monadic interface.
+type SequencedSink state input m output =
+    state -> Sink input m (SequencedSinkResponse state input m output)
 
 data SCState state input m output =
     SCNewState state
   | SCConduit (PreparedConduit input m output)
-  | SCSink (input -> ResourceT m (SinkResult input (SinkConduitResponse state input m output)))
-           (ResourceT m (SinkConduitResponse state input m output))
+  | SCSink (input -> ResourceT m (SinkResult input (SequencedSinkResponse state input m output)))
+           (ResourceT m (SequencedSinkResponse state input m output))
 
-sinkConduit
+-- | Convert a 'SequencedSink' into a 'Conduit'.
+sequenceSink
     :: Resource m
-    => state
-    -> SinkConduit state input m output
+    => state -- ^ initial state
+    -> SequencedSink state input m output
     -> Conduit input m output
-sinkConduit state0 fsink = conduitState
+sequenceSink state0 fsink = conduitState
     (SCNewState state0)
     (scPush id fsink)
     scClose
 
 goRes :: Resource m
-      => SinkConduitResponse state input m output
+      => SequencedSinkResponse state input m output
       -> Maybe input
       -> ([output] -> [output])
-      -> SinkConduit state input m output
+      -> SequencedSink state input m output
       -> ResourceT m (SCState state input m output, ConduitResult input output)
 goRes (Emit state output) (Just input) front fsink =
     scPush (front . (output++)) fsink (SCNewState state) input
 goRes (Emit state output) Nothing front _ =
     return (SCNewState state, Producing $ front output)
 goRes Stop minput front _ =
-    return (error "sinkConduit", Finished minput $ front [])
+    return (error "sequenceSink", Finished minput $ front [])
 goRes (StartConduit c) Nothing front _ = do
     pc <- prepareConduit c
     return (SCConduit pc, Producing $ front [])
@@ -148,7 +154,7 @@ goRes (StartConduit c) (Just input) front fsink = do
 
 scPush :: Resource m
      => ([output] -> [output])
-     -> SinkConduit state input m output
+     -> SequencedSink state input m output
      -> SCState state input m output
      -> input
      -> ResourceT m (SCState state input m output, ConduitResult input output)
@@ -157,7 +163,7 @@ scPush front fsink (SCNewState state) input = do
     case sink of
         SinkData push' close' -> scPush front fsink (SCSink push' close') input
         SinkNoData res -> goRes res (Just input) front fsink
-scPush front fsink (SCConduit conduit) input = do
+scPush front _ (SCConduit conduit) input = do
     res <- conduitPush conduit input
     let res' =
             case res of
@@ -170,7 +176,8 @@ scPush front fsink (SCSink push close) input = do
         Done minput res -> goRes res minput front fsink
         Processing -> return (SCSink push close, Producing $ front [])
 
-scClose (SCNewState state) = return []
+scClose :: Monad m => SCState state inptu m output -> ResourceT m [output]
+scClose (SCNewState _) = return []
 scClose (SCConduit conduit) = conduitClose conduit
 scClose (SCSink _ close) = do
     res <- close

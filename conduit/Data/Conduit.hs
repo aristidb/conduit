@@ -3,50 +3,62 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE DeriveDataTypeable #-}
--- | Note: although this module does expose a resumable source, this source is
--- /not/ threadsafe. It can only be used within a single thread.
---
--- Non-resumable sources are also not-thread-safe, but reusing them in multiple
--- threads is impossible at the type level.
+-- | The main module, exporting types, utility functions, and fuse and connect
+-- operators.
 module Data.Conduit
-    ( -- * Connect pieces together
+    ( -- * Types
+      -- ** Source
+      module Data.Conduit.Types.Source
+      -- ** Sink
+    , module Data.Conduit.Types.Sink
+      -- ** Conduit
+    , module Data.Conduit.Types.Conduit
+    , -- * Connect/fuse operators
       ($$)
     , ($=)
     , (=$)
     , (=$=)
-      -- * Conduit Types
+      -- * Utility functions
       -- ** Source
-    , module Data.Conduit.Types.Source
     , module Data.Conduit.Util.Source
       -- ** Sink
-    , module Data.Conduit.Types.Sink
     , module Data.Conduit.Util.Sink
       -- ** Conduit
-    , module Data.Conduit.Types.Conduit
     , module Data.Conduit.Util.Conduit
       -- * Convenience re-exports
     , ResourceT
     , Resource (..)
     , ResourceIO
+    , ResourceUnsafeIO
     , runResourceT
-    , MonadBase
-    , MonadBaseControl
-    , liftBase
     , ResourceThrow (..)
     ) where
 
 import Control.Monad.Trans.Resource
-import Control.Monad.Trans.Control (MonadBaseControl)
 import Data.Conduit.Types.Source
 import Data.Conduit.Util.Source
 import Data.Conduit.Types.Sink
 import Data.Conduit.Util.Sink
 import Data.Conduit.Types.Conduit
 import Data.Conduit.Util.Conduit
-import Control.Monad.Base (MonadBase, liftBase)
 
 infixr 0 $$
 
+-- | The connect operator, which pulls data from a source and pushes to a sink.
+-- There are three ways this process can terminate:
+--
+-- 1. In the case of a @SinkNoData@ constructor, the source is not opened at
+-- all, and the output value is returned immediately.
+--
+-- 2. The sink returns @Done@, in which case any leftover input is returned via
+-- @bsourceUnpull@ the source is closed.
+--
+-- 3. The source return @Closed@, in which case the sink is closed.
+--
+-- Note that the input source is converted to a 'BufferedSource' via
+-- 'bufferSource'. As such, if the input to this function is itself a
+-- 'BufferedSource', the call to 'bsourceClose' will have no effect, as
+-- described in the comments on that instance.
 ($$) :: (BufferSource bsrc, Resource m) => bsrc m a -> Sink a m b -> ResourceT m b
 bs' $$ Sink msink = do
     sinkI <- msink
@@ -78,6 +90,7 @@ data FuseLeftState a = FLClosed [a] | FLOpen [a]
 
 infixl 1 $=
 
+-- | Left fuse, combining a source and a conduit together into a new source.
 ($=) :: (Resource m, BufferSource bsrc)
      => bsrc m a
      -> Conduit a m b
@@ -101,8 +114,8 @@ bsrc' $= Conduit mc = Source $ do
                 writeRef istate $ FLOpen xs
                 return $ Open x
             FLOpen [] -> do
-                res <- bsourcePull bsrc
-                case res of
+                mres <- bsourcePull bsrc
+                case mres of
                     Closed -> do
                         res <- conduitClose c
                         case res of
@@ -138,6 +151,7 @@ bsrc' $= Conduit mc = Source $ do
 
 infixr 0 =$
 
+-- | Right fuse, combining a conduit and a sink together into a new sink.
 (=$) :: Resource m => Conduit a m b -> Sink b m c -> Sink a m c
 Conduit mc =$ Sink ms = Sink $ do
     s <- ms
@@ -157,7 +171,7 @@ Conduit mc =$ Sink ms = Sink $ do
                                 case mres of
                                     Processing -> push is
                                     Done _sleftover res' -> do
-                                        conduitClose c
+                                        _ <- conduitClose c
                                         return $ Done Nothing res'
                         push sinput
                     Finished cleftover sinput -> do
@@ -182,6 +196,7 @@ Conduit mc =$ Sink ms = Sink $ do
 
 infixr 0 =$=
 
+-- | Middle fuse, combining two conduits together into a new conduit.
 (=$=) :: Resource m => Conduit a m b -> Conduit b m c -> Conduit a m c
 Conduit outerM =$= Conduit innerM = Conduit $ do
     outer <- outerM
@@ -196,8 +211,8 @@ Conduit outerM =$= Conduit innerM = Conduit $ do
                             resI <- conduitPush inner i
                             case resI of
                                 Producing c -> push is (front . (c ++))
-                                Finished leftover c -> do
-                                    conduitClose outer
+                                Finished _leftover c -> do
+                                    _ <- conduitClose outer
                                     return $ Finished Nothing $ front c
                     push inputI id
                 Finished leftoverO inputI -> do
@@ -215,7 +230,7 @@ conduitPushClose c [] = conduitClose c
 conduitPushClose c (input:rest) = do
     res <- conduitPush c input
     case res of
-        Finished a b -> return b
+        Finished _ b -> return b
         Producing b -> do
             b' <- conduitPushClose c rest
             return $ b ++ b'
